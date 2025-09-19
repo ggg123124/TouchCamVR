@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>VRChat相机控制器</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background-color: #333;
+            color: white;
+            touch-action: none;
+        }
+        #gesture-area {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        #feedback {
+            font-size: 24px;
+            margin-bottom: 20px;
+            text-align: center;
+            z-index: 10;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 10px;
+        }
+        .touch-point {
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            background-color: rgba(0, 195, 255, 0.8);
+            border: 2px solid white;
+            border-radius: 50%;
+            pointer-events: none;
+            transform: translate(-50%, -50%);
+            z-index: 5;
+        }
+
+        /* 全屏切换按钮样式 */
+        #fullscreen-toggle-btn {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            font-size: 14px;
+            cursor: pointer;
+            z-index: 100;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: background-color 0.3s, border-color 0.3s;
+            user-select: none; /* 防止文本被选中 */
+            outline: none; /* 移除默认焦点轮廓 */
+        }
+
+        #fullscreen-toggle-btn:hover {
+            background-color: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.7);
+        }
+
+        /* 模式切换按钮样式 */
+        #mode-toggle-btn {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            font-size: 12px;
+            cursor: pointer;
+            z-index: 100;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: background-color 0.3s, border-color 0.3s;
+            user-select: none;
+            outline: none;
+        }
+
+        #mode-toggle-btn:hover {
+            background-color: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.7);
+        }
+
+        /* 双击时的动画效果 */
+        @keyframes doubleClickFeedback {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+        .double-click-feedback {
+            animation: doubleClickFeedback 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <div id="gesture-area">
+        <div id="feedback">已连接，可以开始操作</div>
+    </div>
+
+    <!-- 全屏切换按钮 -->
+    <button id="fullscreen-toggle-btn" title="双击切换全屏模式">FS</button>
+
+    <!-- 模式切换按钮 -->
+    <button id="mode-toggle-btn" title="双击切换控制模式">Mode: <span id="mode-text">区域</span></button>
+
+    <script>
+        let ws;
+        const gestureArea = document.getElementById('gesture-area');
+        const feedbackDiv = document.getElementById('feedback');
+        let activeTouches = {};
+
+        // --- 模式管理 ---
+        const MODES = {
+            FINGER_COUNT: 'finger_count', // 原始模式：单指/双指
+            AREA_SPLIT: 'area_split'      // 新模式：左右区域
+        };
+        let currentMode = MODES.AREA_SPLIT; // 默认使用新模式
+
+        function updateModeButtonText() {
+            const modeText = document.getElementById('mode-text');
+            if (modeText) {
+                modeText.textContent = currentMode === MODES.AREA_SPLIT ? '区域' : '手指';
+            }
+        }
+        // --- 模式管理结束 ---
+
+        // --- 模式切换按钮逻辑 ---
+        const modeToggleBtn = document.getElementById('mode-toggle-btn');
+        let lastModeTap = 0;
+        const DOUBLE_TAP_DELAY = 300;
+
+        function toggleControlMode() {
+            currentMode = currentMode === MODES.AREA_SPLIT ? MODES.FINGER_COUNT : MODES.AREA_SPLIT;
+            feedbackDiv.textContent = `控制模式已切换至: ${currentMode === MODES.AREA_SPLIT ? '左右区域' : '单/双指'}`;
+            feedbackDiv.style.color = "lightblue";
+            updateModeButtonText();
+            // 清除当前活动的触摸点状态，避免模式切换混乱
+            clearAllTouchPoints();
+        }
+
+        modeToggleBtn.addEventListener('click', function(event) {
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastModeTap;
+            if (tapLength < DOUBLE_TAP_DELAY && tapLength > 0) {
+                event.preventDefault();
+                toggleControlMode();
+
+                modeToggleBtn.classList.add('double-click-feedback');
+                setTimeout(() => {
+                    modeToggleBtn.classList.remove('double-click-feedback');
+                }, 300);
+
+                lastModeTap = 0;
+            } else {
+                lastModeTap = currentTime;
+            }
+        });
+        // --- 模式切换按钮逻辑结束 ---
+
+
+        // --- 全屏功能相关 ---
+        const fullscreenBtn = document.getElementById('fullscreen-toggle-btn');
+        let lastFullscreenTap = 0;
+
+        function isFullscreen() {
+            return !!(
+                document.fullscreenElement ||
+                document.webkitFullscreenElement ||
+                document.mozFullScreenElement ||
+                document.msFullscreenElement
+            );
+        }
+
+        function toggleFullscreen() {
+            const elem = document.documentElement;
+
+            if (!isFullscreen()) {
+                if (elem.requestFullscreen) {
+                    elem.requestFullscreen().catch(err => {
+                        console.error(`进入全屏模式失败: ${err.message}`);
+                        feedbackDiv.textContent = "进入全屏失败";
+                        feedbackDiv.style.color = "orange";
+                    });
+                } else if (elem.webkitRequestFullscreen) {
+                    elem.webkitRequestFullscreen();
+                } else if (elem.msRequestFullscreen) {
+                    elem.msRequestFullscreen();
+                }
+                if (!document.fullscreenElement) {
+                     feedbackDiv.textContent = "进入全屏失败或被拒绝";
+                     feedbackDiv.style.color = "orange";
+                }
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen().catch(err => {
+                        console.error(`退出全屏模式失败: ${err.message}`);
+                        feedbackDiv.textContent = "退出全屏失败";
+                        feedbackDiv.style.color = "orange";
+                    });
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+            }
+        }
+
+        function updateFullscreenButtonText() {
+            fullscreenBtn.textContent = isFullscreen() ? "Exit FS" : "FS";
+        }
+
+        fullscreenBtn.addEventListener('click', function(event) {
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastFullscreenTap;
+            if (tapLength < DOUBLE_TAP_DELAY && tapLength > 0) {
+                event.preventDefault();
+                toggleFullscreen();
+                updateFullscreenButtonText();
+
+                fullscreenBtn.classList.add('double-click-feedback');
+                setTimeout(() => {
+                    fullscreenBtn.classList.remove('double-click-feedback');
+                }, 300);
+
+                lastFullscreenTap = 0;
+            } else {
+                lastFullscreenTap = currentTime;
+            }
+        });
+
+        document.addEventListener('fullscreenchange', updateFullscreenButtonText);
+        document.addEventListener('webkitfullscreenchange', updateFullscreenButtonText);
+        document.addEventListener('mozfullscreenchange', updateFullscreenButtonText);
+        document.addEventListener('MSFullscreenChange', updateFullscreenButtonText);
+        // --- 全屏功能相关结束 ---
+
+
+        function connect() {
+            const wsUrl = 'ws://' + window.location.host + '/ws';
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function(event) {
+                console.log("WebSocket连接已建立");
+                feedbackDiv.textContent = "已连接，可以开始操作";
+                feedbackDiv.style.color = "lightgreen";
+                updateFullscreenButtonText();
+                updateModeButtonText();
+            };
+
+            ws.onmessage = function(event) {};
+
+            ws.onclose = function(event) {
+                console.log("WebSocket连接已关闭，尝试重连...");
+                feedbackDiv.textContent = "连接断开，正在重连...";
+                feedbackDiv.style.color = "red";
+                setTimeout(connect, 3000);
+            };
+
+            ws.onerror = function(error) {
+                console.error("WebSocket错误:", error);
+                feedbackDiv.textContent = "连接错误";
+                feedbackDiv.style.color = "red";
+            };
+        }
+
+        // --- 通用触摸点管理 ---
+        function createTouchPoint(id, x, y) {
+            const touchPoint = document.createElement('div');
+            touchPoint.className = 'touch-point';
+            touchPoint.id = 'touch-' + id;
+            touchPoint.style.left = x + 'px';
+            touchPoint.style.top = y + 'px';
+            gestureArea.appendChild(touchPoint);
+        }
+
+        function updateTouchPoint(id, x, y) {
+            const touchPoint = document.getElementById('touch-' + id);
+            if (touchPoint) {
+                touchPoint.style.left = x + 'px';
+                touchPoint.style.top = y + 'px';
+            }
+        }
+
+        function removeTouchPoint(id) {
+            const touchPoint = document.getElementById('touch-' + id);
+            if (touchPoint) {
+                touchPoint.remove();
+            }
+        }
+
+        function clearAllTouchPoints() {
+             // 清除所有触摸点数据和UI元素
+             Object.keys(activeTouches).forEach(id => {
+                 removeTouchPoint(id);
+             });
+             activeTouches = {};
+        }
+        // --- 通用触摸点管理结束 ---
+
+
+        // --- 手指计数模式逻辑 ---
+        let fingerCountGesture = null;
+        let fingerCountDirection = null;
+        const DIRECTION_THRESHOLD = 15;
+        const MIN_MOVE_THRESHOLD = 2;
+
+        function updateFingerCountFeedback() {
+            let text = "请开始手势操作...";
+            if (fingerCountGesture === 'zoom_exposure') {
+                if (fingerCountDirection === 'vertical') {
+                    text = "控制 Zoom (垂直滑动)";
+                } else if (fingerCountDirection === 'horizontal') {
+                    text = "控制 Exposure (水平滑动)";
+                } else {
+                    text = "识别 Zoom/Exposure 滑动方向...";
+                }
+            } else if (fingerCountGesture === 'focal_aperture') {
+                if (fingerCountDirection === 'vertical') {
+                    text = "控制 Focal Distance (垂直滑动)";
+                } else if (fingerCountDirection === 'horizontal') {
+                    text = "控制 Aperture (水平滑动)";
+                } else {
+                    text = "识别 Focal/Aperture 滑动方向...";
+                }
+            }
+            feedbackDiv.textContent = text;
+        }
+
+        function handleFingerCountTouchStart(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                activeTouches[touch.identifier] = {
+                    startX: touch.clientX,
+                    startY: touch.clientY,
+                    lastX: touch.clientX,
+                    lastY: touch.clientY
+                };
+                createTouchPoint(touch.identifier, touch.clientX, touch.clientY);
+            }
+
+            const numTouches = Object.keys(activeTouches).length;
+            if (!fingerCountGesture) {
+                if (numTouches === 1) {
+                    fingerCountGesture = 'zoom_exposure';
+                } else if (numTouches >= 2) {
+                    fingerCountGesture = 'focal_aperture';
+                }
+            }
+            updateFingerCountFeedback();
+        }
+
+        function handleFingerCountTouchMove(e) {
+            if (!fingerCountGesture) return;
+
+            if (!fingerCountDirection) {
+                let totalMoveX = 0;
+                let totalMoveY = 0;
+                let count = 0;
+
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    const touch = e.changedTouches[i];
+                    const touchData = activeTouches[touch.identifier];
+                    if (touchData) {
+                        const deltaX = touch.clientX - touchData.startX;
+                        const deltaY = touch.clientY - touchData.startY;
+                        totalMoveX += deltaX;
+                        totalMoveY += deltaY;
+                        count++;
+                    }
+                }
+
+                if (count > 0) {
+                    const avgMoveX = totalMoveX / count;
+                    const avgMoveY = totalMoveY / count;
+
+                    if (Math.abs(avgMoveY) > DIRECTION_THRESHOLD && Math.abs(avgMoveY) > Math.abs(avgMoveX)) {
+                        fingerCountDirection = 'vertical';
+                        updateFingerCountFeedback();
+                    } else if (Math.abs(avgMoveX) > DIRECTION_THRESHOLD && Math.abs(avgMoveX) > Math.abs(avgMoveY)) {
+                        fingerCountDirection = 'horizontal';
+                        updateFingerCountFeedback();
+                    }
+                }
+            }
+
+            let oscAddress = null;
+            let delta = 0;
+
+            if (fingerCountGesture === 'zoom_exposure' && fingerCountDirection) {
+                let primaryTouchId = Object.keys(activeTouches)[0];
+                let primaryTouchData = activeTouches[primaryTouchId];
+                if (primaryTouchData) {
+                    let primaryTouch = Array.from(e.touches).find(t => t.identifier == primaryTouchId);
+                    if (primaryTouch) {
+                        const deltaX = primaryTouch.clientX - primaryTouchData.lastX;
+                        const deltaY = primaryTouch.clientY - primaryTouchData.lastY;
+
+                        if (Math.abs(deltaY) > MIN_MOVE_THRESHOLD && fingerCountDirection === 'vertical') {
+                            delta = deltaY;
+                            oscAddress = '/usercamera/Zoom';
+                            primaryTouchData.lastX = primaryTouch.clientX;
+                            primaryTouchData.lastY = primaryTouch.clientY;
+                        } else if (Math.abs(deltaX) > MIN_MOVE_THRESHOLD && fingerCountDirection === 'horizontal') {
+                            delta = deltaX;
+                            oscAddress = '/usercamera/Exposure';
+                            primaryTouchData.lastX = primaryTouch.clientX;
+                            primaryTouchData.lastY = primaryTouch.clientY;
+                        }
+                    }
+                }
+            } else if (fingerCountGesture === 'focal_aperture' && fingerCountDirection) {
+                let totalDeltaX = 0;
+                let totalDeltaY = 0;
+                let validCount = 0;
+                let touchesToUpdate = [];
+
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    const touch = e.changedTouches[i];
+                    const touchData = activeTouches[touch.identifier];
+                    if (touchData) {
+                        const deltaX = touch.clientX - touchData.lastX;
+                        const deltaY = touch.clientY - touchData.lastY;
+
+                        if (Math.abs(deltaY) > MIN_MOVE_THRESHOLD || Math.abs(deltaX) > MIN_MOVE_THRESHOLD) {
+                            totalDeltaX += deltaX;
+                            totalDeltaY += deltaY;
+                            validCount++;
+                            touchesToUpdate.push({ id: touch.identifier, touch: touch });
+                        }
+                    }
+                }
+
+                if (validCount > 0) {
+                    const avgDeltaX = totalDeltaX / validCount;
+                    const avgDeltaY = totalDeltaY / validCount;
+
+                    if (fingerCountDirection === 'vertical') {
+                        delta = avgDeltaY;
+                        oscAddress = '/usercamera/FocalDistance';
+                    } else if (fingerCountDirection === 'horizontal') {
+                        delta = avgDeltaX;
+                        oscAddress = '/usercamera/Aperture';
+                    }
+
+                    touchesToUpdate.forEach(item => {
+                        activeTouches[item.id].lastX = item.touch.clientX;
+                        activeTouches[item.id].lastY = item.touch.clientY;
+                    });
+                }
+            }
+
+            if (oscAddress && delta !== 0 && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    address: oscAddress,
+                    delta: delta
+                }));
+            }
+
+            // 更新触摸点UI
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                updateTouchPoint(touch.identifier, touch.clientX, touch.clientY);
+            }
+        }
+
+        function handleFingerCountTouchEnd(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                delete activeTouches[touch.identifier];
+                removeTouchPoint(touch.identifier);
+            }
+
+            const numTouches = Object.keys(activeTouches).length;
+            if (numTouches === 0) {
+                fingerCountGesture = null;
+                fingerCountDirection = null;
+            } else if (numTouches === 1) {
+                fingerCountGesture = 'zoom_exposure';
+            } else if (numTouches >= 2) {
+                fingerCountGesture = 'focal_aperture';
+            }
+            updateFingerCountFeedback();
+        }
+        // --- 手指计数模式逻辑结束 ---
+
+
+        // --- 区域分割模式逻辑 ---
+        function handleAreaSplitTouchStart(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                const touchX = touch.clientX;
+                const screenWidth = window.innerWidth;
+                const isLeftSide = touchX < screenWidth / 2;
+
+                activeTouches[touch.identifier] = {
+                    startX: touchX,
+                    startY: touch.clientY,
+                    lastX: touchX,
+                    lastY: touch.clientY,
+                    isLeftSide: isLeftSide,
+                    directionDetermined: false,
+                    oscAddress: null
+                };
+                createTouchPoint(touch.identifier, touchX, touch.clientY);
+            }
+            feedbackDiv.textContent = "左侧控 Focal/Aperture | 右侧控 Zoom/Exposure";
+        }
+
+        function handleAreaSplitTouchMove(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                const touchId = touch.identifier;
+                const touchData = activeTouches[touchId];
+
+                if (touchData) {
+                    updateTouchPoint(touchId, touch.clientX, touch.clientY);
+
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const deltaX = touch.clientX - touchData.lastX;
+                        const deltaY = touch.clientY - touchData.lastY;
+                        const moveDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+                        if (moveDistance > MIN_MOVE_THRESHOLD) {
+                            if (!touchData.directionDetermined) {
+                                const totalDeltaX = touch.clientX - touchData.startX;
+                                const totalDeltaY = touch.clientY - touchData.startY;
+
+                                if (Math.abs(totalDeltaY) > DIRECTION_THRESHOLD && Math.abs(totalDeltaY) > Math.abs(totalDeltaX)) {
+                                    // 垂直滑动
+                                    if (touchData.isLeftSide) {
+                                        touchData.oscAddress = '/usercamera/FocalDistance';
+                                    } else {
+                                        touchData.oscAddress = '/usercamera/Zoom';
+                                    }
+                                    touchData.directionDetermined = true;
+                                } else if (Math.abs(totalDeltaX) > DIRECTION_THRESHOLD && Math.abs(totalDeltaX) > Math.abs(totalDeltaY)) {
+                                    // 水平滑动
+                                    if (touchData.isLeftSide) {
+                                        touchData.oscAddress = '/usercamera/Aperture';
+                                    } else {
+                                        touchData.oscAddress = '/usercamera/Exposure';
+                                    }
+                                    touchData.directionDetermined = true;
+                                }
+                            }
+
+                            if (touchData.directionDetermined && touchData.oscAddress) {
+                                let deltaValue = 0;
+                                if (touchData.oscAddress === '/usercamera/FocalDistance' || touchData.oscAddress === '/usercamera/Zoom') {
+                                    deltaValue = deltaY;
+                                } else if (touchData.oscAddress === '/usercamera/Aperture' || touchData.oscAddress === '/usercamera/Exposure') {
+                                    deltaValue = deltaX;
+                                }
+
+                                if (deltaValue !== 0) {
+                                    ws.send(JSON.stringify({
+                                        address: touchData.oscAddress,
+                                        delta: deltaValue
+                                    }));
+                                }
+                            }
+
+                            touchData.lastX = touch.clientX;
+                            touchData.lastY = touch.clientY;
+                        }
+                    }
+                }
+            }
+        }
+
+        function handleAreaSplitTouchEnd(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i];
+                const touchId = touch.identifier;
+                delete activeTouches[touchId];
+                removeTouchPoint(touchId);
+            }
+            feedbackDiv.textContent = "左侧控 Focal/Aperture | 右侧控 Zoom/Exposure";
+        }
+        // --- 区域分割模式逻辑结束 ---
+
+
+        // --- 统一事件处理入口 ---
+        gestureArea.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (currentMode === MODES.FINGER_COUNT) {
+                handleFingerCountTouchStart(e);
+            } else if (currentMode === MODES.AREA_SPLIT) {
+                handleAreaSplitTouchStart(e);
+            }
+        });
+
+        gestureArea.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (currentMode === MODES.FINGER_COUNT) {
+                handleFingerCountTouchMove(e);
+            } else if (currentMode === MODES.AREA_SPLIT) {
+                handleAreaSplitTouchMove(e);
+            }
+        });
+
+        gestureArea.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            if (currentMode === MODES.FINGER_COUNT) {
+                handleFingerCountTouchEnd(e);
+            } else if (currentMode === MODES.AREA_SPLIT) {
+                handleAreaSplitTouchEnd(e);
+            }
+        });
+
+        gestureArea.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            // touchcancel 通常与 touchend 处理相同
+            if (currentMode === MODES.FINGER_COUNT) {
+                handleFingerCountTouchEnd(e);
+            } else if (currentMode === MODES.AREA_SPLIT) {
+                handleAreaSplitTouchEnd(e);
+            }
+        });
+        // --- 统一事件处理入口结束 ---
+
+        document.addEventListener('DOMContentLoaded', () => {
+            connect();
+        });
+    </script>
+</body>
+</html>
+
+
+
