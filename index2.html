@@ -25,13 +25,15 @@
             align-items: center;
         }
         #feedback {
-            font-size: 24px;
+            font-size: 20px; /* 稍微减小字体以适应更多文本 */
             margin-bottom: 20px;
             text-align: center;
             z-index: 10;
             background-color: rgba(0, 0, 0, 0.5);
             padding: 10px 20px;
             border-radius: 10px;
+            max-width: 90%;
+            word-wrap: break-word;
         }
         .touch-point {
             position: absolute;
@@ -45,38 +47,9 @@
             z-index: 5;
         }
 
-        /* 全屏切换按钮样式 */
-        #fullscreen-toggle-btn {
+        /* 按钮通用样式 */
+        .control-btn {
             position: fixed;
-            top: 20px;
-            right: 20px;
-            width: 60px;
-            height: 60px;
-            border-radius: 50%;
-            background-color: rgba(255, 255, 255, 0.2);
-            color: white;
-            border: 2px solid rgba(255, 255, 255, 0.5);
-            font-size: 14px;
-            cursor: pointer;
-            z-index: 100;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            transition: background-color 0.3s, border-color 0.3s;
-            user-select: none; /* 防止文本被选中 */
-            outline: none; /* 移除默认焦点轮廓 */
-        }
-
-        #fullscreen-toggle-btn:hover {
-            background-color: rgba(255, 255, 255, 0.3);
-            border-color: rgba(255, 255, 255, 0.7);
-        }
-
-        /* 模式切换按钮样式 */
-        #mode-toggle-btn {
-            position: fixed;
-            top: 20px;
-            left: 20px;
             width: 60px;
             height: 60px;
             border-radius: 50%;
@@ -87,16 +60,37 @@
             cursor: pointer;
             z-index: 100;
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             transition: background-color 0.3s, border-color 0.3s;
             user-select: none;
             outline: none;
+            text-align: center;
+            line-height: 1.2;
         }
 
-        #mode-toggle-btn:hover {
+        .control-btn:hover {
             background-color: rgba(255, 255, 255, 0.3);
             border-color: rgba(255, 255, 255, 0.7);
+        }
+
+        /* 全屏切换按钮 */
+        #fullscreen-toggle-btn {
+            top: 20px;
+            right: 20px;
+        }
+
+        /* 模式切换按钮 */
+        #mode-toggle-btn {
+            top: 20px;
+            left: 20px;
+        }
+
+        /* 目标切换按钮 */
+        #target-toggle-btn {
+            bottom: 20px;
+            left: 20px;
         }
 
         /* 双击时的动画效果 */
@@ -116,10 +110,13 @@
     </div>
 
     <!-- 全屏切换按钮 -->
-    <button id="fullscreen-toggle-btn" title="双击切换全屏模式">FS</button>
+    <button class="control-btn" id="fullscreen-toggle-btn" title="双击切换全屏模式">FS</button>
 
     <!-- 模式切换按钮 -->
-    <button id="mode-toggle-btn" title="双击切换控制模式">Mode: <span id="mode-text">区域</span></button>
+    <button class="control-btn" id="mode-toggle-btn" title="双击切换控制模式">Mode: <span id="mode-text">区域</span></button>
+
+    <!-- 目标切换按钮 -->
+    <button class="control-btn" id="target-toggle-btn" title="双击切换控制目标">Target: <span id="target-text">Camera</span></button>
 
     <script>
         let ws;
@@ -141,6 +138,43 @@
             }
         }
         // --- 模式管理结束 ---
+
+        // --- 控制目标管理 ---
+        const TARGETS = {
+            CAMERA: 'camera',       // 控制 /usercamera/...
+            AVATAR: 'avatar'        // 控制 /avatar/parameters/VirtualLens2_...
+        };
+        let currentTarget = TARGETS.CAMERA; // 默认控制相机
+
+        function updateTargetButtonText() {
+            const targetText = document.getElementById('target-text');
+            if (targetText) {
+                targetText.textContent = currentTarget === TARGETS.AVATAR ? 'Avatar' : 'Camera';
+            }
+        }
+
+        function getOscAddress(baseParam) {
+            if (currentTarget === TARGETS.CAMERA) {
+                return `/usercamera/${baseParam}`;
+            } else if (currentTarget === TARGETS.AVATAR) {
+                // 映射到Avatar参数
+                const mapping = {
+                    'Zoom': 'VirtualLens2_Zoom',
+                    'Aperture': 'VirtualLens2_Aperture',
+                    'Exposure': 'VirtualLens2_Exposure',
+                    'FocalDistance': 'VirtualLens2_Zoom' // Avatar模式下不控制Focal, 但为兼容保留映射
+                };
+                return `/avatar/parameters/${mapping[baseParam] || baseParam}`;
+            }
+            return null;
+        }
+
+        function updateTargetFeedback() {
+            const targetName = currentTarget === TARGETS.AVATAR ? 'Avatar (VirtualLens2)' : 'User Camera';
+            feedbackDiv.textContent = `控制目标: ${targetName}`;
+            feedbackDiv.style.color = "lightblue";
+        }
+        // --- 控制目标管理结束 ---
 
         // --- 模式切换按钮逻辑 ---
         const modeToggleBtn = document.getElementById('mode-toggle-btn');
@@ -252,6 +286,37 @@
         document.addEventListener('MSFullscreenChange', updateFullscreenButtonText);
         // --- 全屏功能相关结束 ---
 
+        // --- 目标切换按钮逻辑 ---
+        const targetToggleBtn = document.getElementById('target-toggle-btn');
+        let lastTargetTap = 0;
+
+        function toggleControlTarget() {
+            currentTarget = currentTarget === TARGETS.CAMERA ? TARGETS.AVATAR : TARGETS.CAMERA;
+            updateTargetFeedback();
+            updateTargetButtonText();
+            // 清除当前活动的触摸点状态，避免目标切换混乱
+            clearAllTouchPoints();
+        }
+
+        targetToggleBtn.addEventListener('click', function(event) {
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastTargetTap;
+            if (tapLength < DOUBLE_TAP_DELAY && tapLength > 0) {
+                event.preventDefault();
+                toggleControlTarget();
+
+                targetToggleBtn.classList.add('double-click-feedback');
+                setTimeout(() => {
+                    targetToggleBtn.classList.remove('double-click-feedback');
+                }, 300);
+
+                lastTargetTap = 0;
+            } else {
+                lastTargetTap = currentTime;
+            }
+        });
+        // --- 目标切换按钮逻辑结束 ---
+
 
         function connect() {
             const wsUrl = 'ws://' + window.location.host + '/ws';
@@ -263,6 +328,7 @@
                 feedbackDiv.style.color = "lightgreen";
                 updateFullscreenButtonText();
                 updateModeButtonText();
+                updateTargetButtonText();
             };
 
             ws.onmessage = function(event) {};
@@ -312,6 +378,9 @@
                  removeTouchPoint(id);
              });
              activeTouches = {};
+             // 重置手势状态
+             fingerCountGesture = null;
+             fingerCountDirection = null;
         }
         // --- 通用触摸点管理结束 ---
 
@@ -341,7 +410,8 @@
                     text = "识别 Focal/Aperture 滑动方向...";
                 }
             }
-            feedbackDiv.textContent = text;
+            const targetName = currentTarget === TARGETS.AVATAR ? 'Avatar' : 'Camera';
+            feedbackDiv.textContent = `[${targetName}] ${text}`;
         }
 
         function handleFingerCountTouchStart(e) {
@@ -415,55 +485,88 @@
 
                         if (Math.abs(deltaY) > MIN_MOVE_THRESHOLD && fingerCountDirection === 'vertical') {
                             delta = deltaY;
-                            oscAddress = '/usercamera/Zoom';
+                            oscAddress = getOscAddress('Zoom');
                             primaryTouchData.lastX = primaryTouch.clientX;
                             primaryTouchData.lastY = primaryTouch.clientY;
                         } else if (Math.abs(deltaX) > MIN_MOVE_THRESHOLD && fingerCountDirection === 'horizontal') {
                             delta = deltaX;
-                            oscAddress = '/usercamera/Exposure';
+                            oscAddress = getOscAddress('Exposure');
                             primaryTouchData.lastX = primaryTouch.clientX;
                             primaryTouchData.lastY = primaryTouch.clientY;
                         }
                     }
                 }
             } else if (fingerCountGesture === 'focal_aperture' && fingerCountDirection) {
-                let totalDeltaX = 0;
-                let totalDeltaY = 0;
-                let validCount = 0;
-                let touchesToUpdate = [];
+                // Avatar模式下不处理Focal Distance
+                if (currentTarget === TARGETS.AVATAR) {
+                     // 在Avatar模式下，双指水平滑动控制Aperture
+                     let totalDeltaX = 0;
+                     let validCount = 0;
+                     let touchesToUpdate = [];
 
-                for (let i = 0; i < e.changedTouches.length; i++) {
-                    const touch = e.changedTouches[i];
-                    const touchData = activeTouches[touch.identifier];
-                    if (touchData) {
-                        const deltaX = touch.clientX - touchData.lastX;
-                        const deltaY = touch.clientY - touchData.lastY;
+                     for (let i = 0; i < e.changedTouches.length; i++) {
+                         const touch = e.changedTouches[i];
+                         const touchData = activeTouches[touch.identifier];
+                         if (touchData) {
+                             const deltaX = touch.clientX - touchData.lastX;
+                             if (Math.abs(deltaX) > MIN_MOVE_THRESHOLD) {
+                                 totalDeltaX += deltaX;
+                                 validCount++;
+                                 touchesToUpdate.push({ id: touch.identifier, touch: touch });
+                             }
+                         }
+                     }
 
-                        if (Math.abs(deltaY) > MIN_MOVE_THRESHOLD || Math.abs(deltaX) > MIN_MOVE_THRESHOLD) {
-                            totalDeltaX += deltaX;
-                            totalDeltaY += deltaY;
-                            validCount++;
-                            touchesToUpdate.push({ id: touch.identifier, touch: touch });
+                     if (validCount > 0) {
+                         const avgDeltaX = totalDeltaX / validCount;
+                         delta = avgDeltaX;
+                         oscAddress = getOscAddress('Aperture'); // Avatar模式下的Aperture
+
+                         touchesToUpdate.forEach(item => {
+                             activeTouches[item.id].lastX = item.touch.clientX;
+                             activeTouches[item.id].lastY = item.touch.clientY;
+                         });
+                     }
+                } else {
+                    // Camera模式下处理Focal Distance和Aperture
+                    let totalDeltaX = 0;
+                    let totalDeltaY = 0;
+                    let validCount = 0;
+                    let touchesToUpdate = [];
+
+                    for (let i = 0; i < e.changedTouches.length; i++) {
+                        const touch = e.changedTouches[i];
+                        const touchData = activeTouches[touch.identifier];
+                        if (touchData) {
+                            const deltaX = touch.clientX - touchData.lastX;
+                            const deltaY = touch.clientY - touchData.lastY;
+
+                            if (Math.abs(deltaY) > MIN_MOVE_THRESHOLD || Math.abs(deltaX) > MIN_MOVE_THRESHOLD) {
+                                totalDeltaX += deltaX;
+                                totalDeltaY += deltaY;
+                                validCount++;
+                                touchesToUpdate.push({ id: touch.identifier, touch: touch });
+                            }
                         }
                     }
-                }
 
-                if (validCount > 0) {
-                    const avgDeltaX = totalDeltaX / validCount;
-                    const avgDeltaY = totalDeltaY / validCount;
+                    if (validCount > 0) {
+                        const avgDeltaX = totalDeltaX / validCount;
+                        const avgDeltaY = totalDeltaY / validCount;
 
-                    if (fingerCountDirection === 'vertical') {
-                        delta = avgDeltaY;
-                        oscAddress = '/usercamera/FocalDistance';
-                    } else if (fingerCountDirection === 'horizontal') {
-                        delta = avgDeltaX;
-                        oscAddress = '/usercamera/Aperture';
+                        if (fingerCountDirection === 'vertical') {
+                            delta = avgDeltaY;
+                            oscAddress = getOscAddress('FocalDistance');
+                        } else if (fingerCountDirection === 'horizontal') {
+                            delta = avgDeltaX;
+                            oscAddress = getOscAddress('Aperture');
+                        }
+
+                        touchesToUpdate.forEach(item => {
+                            activeTouches[item.id].lastX = item.touch.clientX;
+                            activeTouches[item.id].lastY = item.touch.clientY;
+                        });
                     }
-
-                    touchesToUpdate.forEach(item => {
-                        activeTouches[item.id].lastX = item.touch.clientX;
-                        activeTouches[item.id].lastY = item.touch.clientY;
-                    });
                 }
             }
 
@@ -521,7 +624,8 @@
                 };
                 createTouchPoint(touch.identifier, touchX, touch.clientY);
             }
-            feedbackDiv.textContent = "左侧控 Focal/Aperture | 右侧控 Zoom/Exposure";
+            const targetName = currentTarget === TARGETS.AVATAR ? 'Avatar' : 'Camera';
+            feedbackDiv.textContent = `[${targetName}] 左侧控 Focal/Aperture | 右侧控 Zoom/Exposure`;
         }
 
         function handleAreaSplitTouchMove(e) {
@@ -546,17 +650,19 @@
                                 if (Math.abs(totalDeltaY) > DIRECTION_THRESHOLD && Math.abs(totalDeltaY) > Math.abs(totalDeltaX)) {
                                     // 垂直滑动
                                     if (touchData.isLeftSide) {
-                                        touchData.oscAddress = '/usercamera/FocalDistance';
+                                        if (currentTarget !== TARGETS.AVATAR) { // Avatar模式下不控制Focal
+                                            touchData.oscAddress = getOscAddress('FocalDistance');
+                                        }
                                     } else {
-                                        touchData.oscAddress = '/usercamera/Zoom';
+                                        touchData.oscAddress = getOscAddress('Zoom');
                                     }
                                     touchData.directionDetermined = true;
                                 } else if (Math.abs(totalDeltaX) > DIRECTION_THRESHOLD && Math.abs(totalDeltaX) > Math.abs(totalDeltaY)) {
                                     // 水平滑动
                                     if (touchData.isLeftSide) {
-                                        touchData.oscAddress = '/usercamera/Aperture';
+                                        touchData.oscAddress = getOscAddress('Aperture');
                                     } else {
-                                        touchData.oscAddress = '/usercamera/Exposure';
+                                        touchData.oscAddress = getOscAddress('Exposure');
                                     }
                                     touchData.directionDetermined = true;
                                 }
@@ -564,9 +670,9 @@
 
                             if (touchData.directionDetermined && touchData.oscAddress) {
                                 let deltaValue = 0;
-                                if (touchData.oscAddress === '/usercamera/FocalDistance' || touchData.oscAddress === '/usercamera/Zoom') {
+                                if (touchData.oscAddress === getOscAddress('FocalDistance') || touchData.oscAddress === getOscAddress('Zoom')) {
                                     deltaValue = deltaY;
-                                } else if (touchData.oscAddress === '/usercamera/Aperture' || touchData.oscAddress === '/usercamera/Exposure') {
+                                } else if (touchData.oscAddress === getOscAddress('Aperture') || touchData.oscAddress === getOscAddress('Exposure')) {
                                     deltaValue = deltaX;
                                 }
 
@@ -593,7 +699,8 @@
                 delete activeTouches[touchId];
                 removeTouchPoint(touchId);
             }
-            feedbackDiv.textContent = "左侧控 Focal/Aperture | 右侧控 Zoom/Exposure";
+            const targetName = currentTarget === TARGETS.AVATAR ? 'Avatar' : 'Camera';
+            feedbackDiv.textContent = `[${targetName}] 左侧控 Focal/Aperture | 右侧控 Zoom/Exposure`;
         }
         // --- 区域分割模式逻辑结束 ---
 

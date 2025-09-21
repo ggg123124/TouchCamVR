@@ -31,6 +31,9 @@ camera_params = {
     "/usercamera/SmoothingStrength": {"value": 5.0, "min": 0.1, "max": 10.0},
     "/usercamera/PhotoRate": {"value": 1.0, "min": 0.1, "max": 2.0},
     "/usercamera/Duration": {"value": 2.0, "min": 0.1, "max": 60.0},
+    "/avatar/parameters/VirtualLens2_Exposure":{"value": 0.5, "min": 0.0, "max": 1.0},
+    "/avatar/parameters/VirtualLens2_Aperture":{"value": 0.5, "min": 0.0, "max": 1.0},
+    "/avatar/parameters/VirtualLens2_Zoom":{"value": 0.5, "min": 0.0, "max": 1.0}
 }
 
 # 存储所有活跃的WebSocket连接
@@ -122,7 +125,7 @@ class WebSocketHandler(websocket.WebSocketHandler):
                         self.osc_send_timers[osc_address] = timer_handle
                     # 如果已有定时器，则只需更新 pending_osc_values，
                     # 定时器到期时会发送最新的值
-
+                print(osc_address, new_value)  # 调试输出新值
                 # 如果达到极限，发送通知（这部分不需要节流）
                 if limit_reached:
                     limit_message = json.dumps({
