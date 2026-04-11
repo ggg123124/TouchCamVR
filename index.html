@@ -122,7 +122,7 @@
 
 <body>
     <div id="gesture-area">
-        <div id="feedback">已连接，可以开始操作</div>
+        <div id="feedback">已连接，双击中心区域拍照</div>
     </div>
 
     <!-- 全屏切换按钮 -->
@@ -135,18 +135,52 @@
     <button class="control-btn" id="target-toggle-btn" title="双击切换控制目标">Target: <span
             id="target-text">Camera</span></button>
 
+    <!-- 拍照按钮 -->
+    <button class="control-btn" id="capture-btn" title="点击拍照" style="bottom: 20px; right: 20px; background-color: rgba(255, 100, 100, 0.3);">📸</button>
+
     <script>
         let ws;
         const gestureArea = document.getElementById('gesture-area');
         const feedbackDiv = document.getElementById('feedback');
         let activeTouches = {};
 
+        // --- 配置缓存管理 ---
+        const CONFIG_KEY = 'vrc_camera_config';
+
+        function saveConfig() {
+            const config = {
+                currentMode: currentMode,
+                currentTarget: currentTarget
+            };
+            localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+            console.log('配置已保存:', config);
+        }
+
+        function loadConfig() {
+            try {
+                const saved = localStorage.getItem(CONFIG_KEY);
+                if (saved) {
+                    const config = JSON.parse(saved);
+                    if (config.currentMode) {
+                        currentMode = config.currentMode;
+                    }
+                    if (config.currentTarget) {
+                        currentTarget = config.currentTarget;
+                    }
+                    console.log('配置已恢复:', config);
+                }
+            } catch (e) {
+                console.error('加载配置失败:', e);
+            }
+        }
+        // --- 配置缓存管理结束 ---
+
         // --- 模式管理 ---
         const MODES = {
             FINGER_COUNT: 'finger_count', // 原始模式：单指/双指
             AREA_SPLIT: 'area_split'      // 新模式：左右区域
         };
-        let currentMode = MODES.AREA_SPLIT; // 默认使用新模式
+        let currentMode = MODES.AREA_SPLIT; // 默认使用新模式（会被 loadConfig 覆盖）
 
         function updateModeButtonText() {
             const modeText = document.getElementById('mode-text');
@@ -161,7 +195,7 @@
             CAMERA: 'camera',       // 控制 /usercamera/...
             AVATAR: 'avatar'        // 控制 /avatar/parameters/VirtualLens2_...
         };
-        let currentTarget = TARGETS.CAMERA; // 默认控制相机
+        let currentTarget = TARGETS.CAMERA; // 默认控制相机（会被 loadConfig 覆盖）
 
         function updateTargetButtonText() {
             const targetText = document.getElementById('target-text');
@@ -203,6 +237,7 @@
             feedbackDiv.textContent = `控制模式已切换至: ${currentMode === MODES.AREA_SPLIT ? '左右区域' : '单/双指'}`;
             feedbackDiv.style.color = "lightblue";
             updateModeButtonText();
+            saveConfig(); // 保存配置
             // 清除当前活动的触摸点状态，避免模式切换混乱
             clearAllTouchPoints();
         }
@@ -311,6 +346,7 @@
             currentTarget = currentTarget === TARGETS.CAMERA ? TARGETS.AVATAR : TARGETS.CAMERA;
             updateTargetFeedback();
             updateTargetButtonText();
+            saveConfig(); // 保存配置
             // 清除当前活动的触摸点状态，避免目标切换混乱
             clearAllTouchPoints();
         }
@@ -333,6 +369,14 @@
             }
         });
         // --- 目标切换按钮逻辑结束 ---
+
+        // --- 拍照按钮逻辑 ---
+        const captureBtn = document.getElementById('capture-btn');
+        captureBtn.addEventListener('click', function (event) {
+            event.preventDefault();
+            capturePhoto();
+        });
+        // --- 拍照按钮逻辑结束 ---
 
 
         function connect() {
@@ -541,7 +585,7 @@
 
                     if (validCount > 0) {
                         const avgDeltaX = totalDeltaX / validCount;
-                        delta = avgDeltaX;
+                        delta = -avgDeltaX; // 光圈方向取反
                         oscAddress = getOscAddress('Aperture'); // Avatar模式下的Aperture
 
                         touchesToUpdate.forEach(item => {
@@ -580,7 +624,7 @@
                             delta = avgDeltaY;
                             oscAddress = getOscAddress('FocalDistance');
                         } else if (fingerCountDirection === 'horizontal') {
-                            delta = avgDeltaX;
+                            delta = -avgDeltaX; // 光圈方向取反
                             oscAddress = getOscAddress('Aperture');
                         }
 
@@ -695,7 +739,9 @@
                                 let deltaValue = 0;
                                 if (touchData.oscAddress === getOscAddress('FocalDistance') || touchData.oscAddress === getOscAddress('Zoom')) {
                                     deltaValue = deltaY;
-                                } else if (touchData.oscAddress === getOscAddress('Aperture') || touchData.oscAddress === getOscAddress('Exposure')) {
+                                } else if (touchData.oscAddress === getOscAddress('Aperture')) {
+                                    deltaValue = -deltaX; // 光圈方向取反
+                                } else if (touchData.oscAddress === getOscAddress('Exposure')) {
                                     deltaValue = deltaX;
                                 }
 
@@ -749,6 +795,12 @@
 
         gestureArea.addEventListener('touchend', (e) => {
             e.preventDefault();
+            
+            // 双击拍照检测（在所有手指离开时）
+            if (e.touches.length === 0 && e.changedTouches.length === 1) {
+                checkDoubleTap(e.changedTouches[0]);
+            }
+            
             if (currentMode === MODES.FINGER_COUNT) {
                 handleFingerCountTouchEnd(e);
             } else if (currentMode === MODES.AREA_SPLIT) {
@@ -768,8 +820,83 @@
         // --- 统一事件处理入口结束 ---
 
         document.addEventListener('DOMContentLoaded', () => {
+            loadConfig(); // 先加载保存的配置
+            updateModeButtonText(); // 更新按钮显示
+            updateTargetButtonText(); // 更新按钮显示
+            updateTargetFeedback(); // 更新反馈显示
             connect();
         });
+
+        // --- Media Session 音量键/耳机按钮拍照 ---
+        function capturePhoto() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    address: "/usercamera/Capture",
+                    action: "capture"
+                }));
+                feedbackDiv.textContent = "📸 已拍照！";
+                feedbackDiv.style.color = "yellow";
+                console.log('拍照命令已发送');
+                // 短暂震动反馈（如果支持）
+                if (navigator.vibrate) {
+                    navigator.vibrate(100);
+                }
+                // 2秒后恢复原显示
+                setTimeout(() => {
+                    updateTargetFeedback();
+                }, 2000);
+            } else {
+                feedbackDiv.textContent = "未连接，无法拍照";
+                feedbackDiv.style.color = "red";
+            }
+        }
+
+        // --- 双击屏幕拍照 ---
+        let lastTapTime = 0;
+        let lastTapX = 0;
+        let lastTapY = 0;
+        const DOUBLE_TAP_THRESHOLD = 400; // 双击时间间隔（毫秒）
+        const DOUBLE_TAP_DISTANCE = 80; // 双击位置距离阈值（像素）
+        const DOUBLE_TAP_ZONE_RADIUS = 60; // 双击区域半径（像素）
+
+        function isInDoubleTapZone(x, y) {
+            const centerX = window.innerWidth / 2;
+            const centerY = window.innerHeight / 2;
+            const distance = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+            return distance <= DOUBLE_TAP_ZONE_RADIUS;
+        }
+
+        function checkDoubleTap(touch) {
+            const touchX = touch.clientX;
+            const touchY = touch.clientY;
+            const now = Date.now();
+
+            // 只在中间圆形区域内检测双击
+            if (isInDoubleTapZone(touchX, touchY)) {
+                // 检查是否是双击（时间间隔和位置都要符合）
+                const timeDiff = now - lastTapTime;
+                const distanceX = Math.abs(touchX - lastTapX);
+                const distanceY = Math.abs(touchY - lastTapY);
+
+                if (timeDiff < DOUBLE_TAP_THRESHOLD && 
+                    timeDiff > 50 && 
+                    distanceX < DOUBLE_TAP_DISTANCE && 
+                    distanceY < DOUBLE_TAP_DISTANCE) {
+                    // 双击检测到！
+                    console.log('双击检测到 -> 拍照');
+                    capturePhoto();
+                    lastTapTime = 0;
+                    return;
+                }
+                
+                // 记录本次点击
+                lastTapTime = now;
+                lastTapX = touchX;
+                lastTapY = touchY;
+            } else {
+                lastTapTime = 0; // 在区域外重置
+            }
+        }
     </script>
 </body>
 

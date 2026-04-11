@@ -89,6 +89,13 @@ class WebSocketHandler(websocket.WebSocketHandler):
             data = json.loads(message)
             osc_address = data.get("address")
             delta = data.get("delta")
+            action = data.get("action")
+
+            # 处理动作类型的消息（如拍照）
+            if action == "capture" and osc_address:
+                osc_client.send_message(osc_address, True)
+                logger.info(f"Sent OSC action: {osc_address} -> True (capture)")
+                return
 
             if osc_address in camera_params:
                 param_info = camera_params[osc_address]
